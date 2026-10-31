@@ -9,9 +9,9 @@ Every address is an absolute 68000 address in the running game unless stated oth
 
 ## 1. The game and its authors
 
-| | |
-|---|---|
+
 | Title | **Switchblade** (Atari ST version, 1989) |
+|---|---|
 | Design, program, graphics and sound | **Simon Phipps** |
 | Music | **Ben Daglish** |
 | Developer / publisher | **Core Design** / **Gremlin Graphics** |
