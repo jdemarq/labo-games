@@ -1,10 +1,8 @@
-# Guru Logi Champ (GBA) — Android port: state of the reconstruction
+# Guru Logi Champ (GBA) — data analysis for an Android port
 
-Review of a private project repository that attempts to port the Game Boy Advance puzzle game
-*Guru Logi Champ* to a native Android application. This report describes what the repository
-really contains, what works, what does not, and what a genuine port would require.
-
-The figures below were checked against the files themselves, not taken from the project README.
+Technical notes on an attempt to port the Game Boy Advance puzzle game *Guru Logi Champ* to a
+native Android application: how the extracted data was analysed, what the analysis showed, how
+the data is formatted, and what a working port requires.
 
 ## 1. The game and its rights holders
 
@@ -18,154 +16,126 @@ The figures below were checked against the files themselves, not taken from the 
 The game, its code, graphics, music, text and level data remain the property of their rights
 holders. The Game Boy Advance header and boot logo belong to Nintendo.
 
-### Copyright policy for this document
+This document contains **no** game data: no ROM bytes, graphics, text, level layouts or audio.
+It describes only methods and data structures. Anyone reproducing the work must use their own
+legally obtained copy of the cartridge, and should never commit ROM data to a repository.
 
-This report contains **no** game data: no ROM bytes, no graphics, no text from the game, no level
-layouts and no audio. It describes only structures, methods and the state of the project's own
-code. Anyone reproducing the work must supply their own legally obtained copy of the cartridge.
+## 2. Analysis method
 
-## 2. What the repository contains
+The extraction pipeline produced two kinds of output: binary files named after asset types
+(tiles, sprites, palettes, maps, music…) and JSON files meant to describe level metadata, tiles
+and entities. Each was checked against the ROM rather than trusted by its name.
 
+1. **Identity check.** Hash every binary (MD5) and group identical files.
+2. **Header check.** Look at the first bytes of each file for the GBA cartridge header (entry
+   branch at `0x00`, Nintendo logo at `0x04`, title at `0xA0`, fixed value `0x96` at `0xB2`).
+3. **Prefix check.** Compare each smaller file with the start of the larger ones.
+4. **Record reconstruction.** For each JSON record, concatenate its fields back into bytes and
+   compare them with the ROM at the record's `index`.
+5. **Content check.** Disassemble a sample of reconstructed records as ARM and Thumb code, and
+   look at offsets, strides and value ranges for signs of real structures (bounded coordinates,
+   small type enums, pointers into `0x08xxxxxx`).
+
+## 3. Results
+
+### 3.1 The binaries are ROM prefixes, not assets
+
+- All binaries begin with the full GBA cartridge header.
+- They fall into three groups of byte-identical files: 64 KiB, 1 MiB and 2 MiB.
+- Each smaller file equals the start of the larger ones: every file is simply **the first N bytes
+  of the same ROM**, whatever its name.
+
+No asset was isolated: the names (`tiles`, `music`, …) do not match their content.
+
+### 3.2 The JSON records are fixed-size slices of the ROM
+
+Every record has the shape:
+
+```json
+{ "index": 264, "type": "XX", "coordX": "0xXXXX", "coordY": "0xXXXX", "flags": "0xXXXX", "data": "XXXXXXXXXX" }
 ```
-README.md
-android-project/
-  build.gradle, settings.gradle, gradle.properties
-  gradle/wrapper/ (jar + properties), gradlew.bat      # no Unix gradlew script
-  app/build.gradle, proguard-rules.pro
-  app/src/main/AndroidManifest.xml
-  app/src/main/java/com/gurulogic/game/MainActivity.java
-  app/src/main/java/com/gurulogic/game/GameRenderer.java
-  app/src/main/res/ (layout, launcher icons, strings, themes)
-  app/src/main/assets/
-    10 × .bin files  (64 KiB to 2 MiB each, ~11 MiB total)
-    level_metadata.json   (22 records)
-    level_tiles.json      (4,761 records, ~0.9 MB)
-    level_entities.json   (82,598 records, ~15 MB)
-```
 
-The `extracted/` folder and the Python extraction scripts mentioned in the README are **not** in
-the repository; the README paths point to a local Windows folder on the author's machine.
-Some README characters were also lost (`ndroid-project`, `ssets/`, `iles.bin`), typical of a
-PowerShell backtick escape (`` `a ``, `` `t ``) eating the first letter.
-
-## 3. Findings
-
-### 3.1 The `.bin` "assets" are not extracted assets
-
-All ten files start with the GBA cartridge header (entry branch + Nintendo logo). Comparing them:
-
-| Files | Size | Content |
+| Field | Bytes | Meaning found |
 |---|---|---|
-| `tiles`, `maps`, `objects`, `scripts`, `dialogues`, `text_data`, `audio_samples` | 1 MiB | **byte-identical** |
-| `sprites`, `music` | 2 MiB | **byte-identical** |
-| `palettes` | 64 KiB | — |
+| `index` | — | byte offset in the ROM, always a multiple of 12 |
+| `type` | 1 | byte at `index` |
+| `coordX` | 2 | next 2 bytes, written as a big-endian hex string |
+| `coordY` | 2 | next 2 bytes, same |
+| `flags` | 2 | next 2 bytes, same |
+| `data` | 5 | last 5 bytes, as a hex string |
 
-Every file is a **prefix of the same ROM dump**: the 1 MiB files equal the first 1 MiB of the
-2 MiB files, and `palettes.bin` equals their first 64 KiB. The names (`tiles`, `music`…) are
-labels only; no file was cut at a real data boundary.
+Concatenating the fields gives back exactly the 12 ROM bytes at `index`. The records therefore
+cut the ROM into **12-byte windows** with no relation to the game's real structures:
 
-### 3.2 The "JSON trilogy" is the ROM sliced into 12-byte records
+- "metadata" records start at offset 0, i.e. inside the cartridge header;
+- "entity" records disassemble cleanly as **ARM machine code** (data-processing and stack
+  instructions), not as game objects;
+- "tile" records are another filtered selection of the same windows.
 
-Each JSON record has the shape `{index, type, coordX, coordY, flags, data}`:
+The labels `type`, `coordX`, `coordY` and `flags` carry no meaning. Note also that GBA data is
+**little-endian**, so even a real 16-bit field would be misread by this big-endian formatting.
 
-- `index` is a byte offset in the ROM, always a multiple of 12;
-- the 12 bytes at that offset are split mechanically: 1 byte → `type`, 2 → `coordX`,
-  2 → `coordY`, 2 → `flags`, 5 → `data`.
+### 3.3 Conclusion
 
-Checked on the first record of each file: concatenating the fields gives back exactly the ROM
-bytes at `index`. The records of `level_metadata.json` start at offset 0, i.e. the cartridge
-header itself. Those of `level_entities.json` decode as **ARM machine code** (data-processing and
-stack instructions), not as game objects. `level_tiles.json` and `level_entities.json` select
-different offsets by some filter, but neither holds tile, map or entity structures.
+No game format has been decoded yet. A renderer fed with this data can only draw noise; the
+extraction step has to be redone from the real formats below.
 
-So no game format was decoded: the "coordinates", "flags" and "types" have no meaning.
+## 4. Real GBA data formats to look for
 
-### 3.3 The Android code does not compile and does not use the data
-
-`GameRenderer.java`:
-- uses **single quotes for strings** (`'Guru Logic Champ'`, `'level_tiles.json'`): in Java these
-  are character literals, so the file does not compile;
-- `loadGameData()` is never called; it reads `level_tiles.json` into a buffer that is then
-  discarded; there is no `org.json` parsing despite the README;
-- the 240×160 bitmap (GBA resolution) is created empty and drawn unscaled at the top-left;
-- the render thread spins without frame pacing and busy-waits when the surface is not valid;
-- there is no input handling, game logic, palette or tile decoding.
-
-The other Java files and resources use single quotes too (fine in XML, not in Java).
-
-Build configuration:
-- `classpath 'com.android.tools.build:gradle:4.2.2'` is incompatible with `namespace` and
-  `compileSdk 34` in `app/build.gradle` (both need AGP 7.x/8.x);
-- the root `build.gradle` uses `allprojects { repositories }` while `settings.gradle` sets
-  `FAIL_ON_PROJECT_REPOS`, which makes the build fail;
-- no Unix `gradlew` script; Java 8 target;
-- the manifest asks for `INTERNET` (unused) and forces **portrait**, while the game is landscape.
-
-### 3.4 README claims vs reality
-
-| README item | Actual state |
+| Data | Format |
 |---|---|
-| ROM binary parsing — completed | ROM copied in fixed-size prefixes, no parsing |
-| Extraction to JSON — completed | Fixed 12-byte slicing, no semantic fields |
-| Android asset deployment — completed | Files are in `assets/`, but they are the ROM |
-| Java JSON engine — completed | Does not compile; JSON not parsed; nothing rendered except a title |
-| Entity logic & collision — open | Correct: not started |
+| Colours | 15-bit **BGR555**, little-endian `u16` (`0bbbbbgg gggrrrrr`); palettes of 16 × 16 or 1 × 256 colours, 512 bytes for BG + 512 for sprites |
+| Tiles | 8 × 8 pixels; **4bpp** = 32 bytes (two pixels per byte, low nibble = left pixel) or **8bpp** = 64 bytes |
+| Text tilemaps | `u16` per cell: bits 0–9 tile number, 10 horizontal flip, 11 vertical flip, 12–15 palette bank |
+| Affine tilemaps | `u8` per cell (tile number only); used for rotating/scaled backgrounds, a likely fit for the rotating board |
+| Sprites (OAM) | 3 × `u16` attributes: Y, shape, mode / X, size, flips or affine index / tile, priority, palette |
+| Pointers | 32-bit little-endian, ROM data at `0x08000000`–`0x09FFFFFF` |
+| Compression | BIOS formats, identified by the first byte of a 4-byte header (`type`, then 24-bit uncompressed size): `0x10` LZ77, `0x2x` Huffman, `0x30` RLE, `0x8x` diff filter; called through `SWI 0x11/0x12` (LZ77), `0x13` (Huffman), `0x14/0x15` (RLE) |
+| Text | Japanese game: Shift-JIS or a custom table mapping to font tiles |
+| Puzzles | Unknown, game-specific; expect a small grid (target picture + starting blocks) per level, reached through a pointer table |
 
-## 4. Legal point to fix first
+Memory map useful to follow data at run time: EWRAM `0x02000000`, IWRAM `0x03000000`, I/O
+`0x04000000`, palette RAM `0x05000000`, VRAM `0x06000000`, OAM `0x07000000`.
 
-The project repository currently stores ~2 MiB of the commercial ROM (several times over) in the
-assets and in the JSON files. Even in a private repository, this is a copy of copyrighted code
-and data. Recommended:
+## 5. How to locate the real data
 
-1. remove `app/src/main/assets/*.bin` and the three JSON files;
-2. **purge them from Git history** (`git filter-repo --path app/src/main/assets --invert-paths`
-   or BFG), then force-push;
-3. add `*.gba`, `*.bin`, and the generated asset folder to `.gitignore`;
-4. ship tools that extract data **at runtime or at build time from the user's own ROM**, as
-   done for Switchblade, never the data itself.
+1. **Disassemble** the ROM in Ghidra (ARM7TDMI, mixed ARM/Thumb; switch mode on `BX` targets).
+   Find the entry point, the interrupt handler and the main loop.
+2. **Find decompression calls** (`SWI 0x11`–`0x15`) and the pointers passed to them: each leads
+   to a compressed asset.
+3. **Watch the hardware** in a debugging emulator (mGBA, No$GBA): set write breakpoints on
+   palette RAM, VRAM and OAM while a puzzle loads, then trace back to the ROM source address.
+4. **Scan for pointer tables**: runs of little-endian `u32` values all in `0x08xxxxxx`, evenly
+   spaced, usually point to levels, graphics or text.
+5. **Validate visually**: render a candidate palette + tile block + tilemap and compare it with
+   an emulator screenshot of the same scene.
 
-## 5. What a real port needs
+## 6. Two ways to build the Android port
 
-Two viable approaches, as for *Switchblade*:
+**A. Static recompilation** (as for *Switchblade*): translate the ARM/Thumb code to C, build it
+with the NDK, and supply a runtime for the PPU (tile modes, affine backgrounds, sprites), DMA,
+timers, interrupts, keypad, Direct Sound + PSG audio and save memory. Exact behaviour, faster to
+reach.
 
-**A. Static recompilation of the game code** (closest to the Switchblade method)
-- CPU: ARM7TDMI, mixed **ARM and Thumb** code; ROM mapped at `0x08000000`, IWRAM
-  `0x03000000`, EWRAM `0x02000000`, I/O `0x04000000`, palette RAM `0x05000000`, VRAM
-  `0x06000000`, OAM `0x07000000`.
-- Trace code from the entry point and interrupt handler, separating ARM/Thumb by `BX` targets;
-  watch for code copied to IWRAM at boot and for jump tables.
-- Translate to C, then build for Android with the NDK.
-- Runtime to emulate: PPU (tile modes 0–2, possibly bitmap modes, sprites/OAM, affine
-  backgrounds — the rotating board likely uses them), DMA, timers, interrupts, keypad, Direct
-  Sound + the 4 PSG channels, and the save type (to identify).
+**B. Re-implementation**: decode every format of section 4, rewrite the rules (firing and
+pulling blocks, board rotation, win check) natively, and load graphics and levels from the
+user's own ROM at first launch. Cleaner code, but every format must be decoded.
 
-**B. Re-implementation from decoded data**
-- Find the real formats: palettes (15-bit BGR, 16/256 colours), 4bpp/8bpp tiles, tilemaps,
-  sprites, puzzle definitions, text encoding (Shift-JIS or custom), and any compression
-  (GBA BIOS LZ77 `0x10`, Huffman, RLE are common — check for `SWI 0x11/0x12` calls).
-- Locate them by following pointers from the code, or by watching VRAM/palette writes in a
-  debugger emulator (mGBA, No$GBA) while a puzzle loads.
-- Rewrite the rules (block firing, pulling, board rotation, win check) natively and load
-  levels from the user's ROM at first launch.
+In both cases, the app should read data from a ROM supplied by the user (checked by size, header
+and checksum) and never ship it.
 
-Approach A gives an exact copy faster; approach B gives cleaner code but requires decoding every
-format and rewriting the rules.
+## 7. Checklist
 
-## 6. Checklist to restart properly
-
-1. Clean the repository (section 4).
-2. Write a ROM loader that verifies the user's file (size, header, checksum) without
-   distributing it.
-3. Disassemble with Ghidra (ARM/Thumb, GBA loader) and map the main loop, VBlank handler and
-   level-loading routine.
-4. Pick approach A or B; validate each step against an emulator (frame-by-frame screenshots and
-   RAM comparisons, as done for Switchblade).
-5. Fix the Android project: AGP 8.x, a valid repository setup, a Unix `gradlew`, landscape,
-   integer scaling of the 240×160 frame, touch controls mapped to the GBA buttons.
-6. Update the README to describe the real state.
+1. Write a ROM loader that verifies the user's file without distributing it.
+2. Map code and data with the steps of section 5.
+3. Write one extractor per real format, each validated against emulator screenshots.
+4. Choose approach A or B and validate frame by frame against an emulator.
+5. Android host: landscape, integer scaling of the 240 × 160 frame, touch controls mapped to the
+   GBA buttons.
 
 ## Sources
 
 - [Guru Logi Champ — Wikipedia mirror (wiki2)](https://wiki2.org/en/Guru_Logi_Champ)
 - [Guru Logi Champ — The Cutting Room Floor](https://tcrf.net/Guru_Logi_Champ)
 - [Guru Logi Champ — MobyGames](https://www.mobygames.com/game/20866/guru-logi-champ/trivia/)
+- [GBATEK — GBA technical reference](https://problemkaputt.de/gbatek.htm)
